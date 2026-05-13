@@ -7,24 +7,21 @@ async function main() {
   const name = "Meme Token";
   const symbol = "MEME";
   const totalSupply = 1_000_000;
-  const buyTax = 300;  // 3% 买入税
-  const sellTax = 500; // 5% 卖出税
+  const buyTax = 300;  // 3%
+  const sellTax = 500; // 5%
 
-  // 使用部署者地址作为初始的钱包地址（实际项目应替换为独立地址）
   const marketingWallet = deployer.address;
   const teamWallet = deployer.address;
 
   console.log("========================================");
   console.log("  MemeToken 部署脚本");
   console.log("========================================");
-  console.log(`  Name:            ${name}`);
-  console.log(`  Symbol:          ${symbol}`);
-  console.log(`  Total Supply:    ${totalSupply.toLocaleString()}`);
-  console.log(`  Buy Tax:         ${buyTax / 100}%`);
-  console.log(`  Sell Tax:        ${sellTax / 100}%`);
-  console.log(`  Marketing Wallet: ${marketingWallet}`);
-  console.log(`  Team Wallet:      ${teamWallet}`);
-  console.log(`  Deployer:         ${deployer.address}`);
+  console.log(`  Name:             ${name}`);
+  console.log(`  Symbol:           ${symbol}`);
+  console.log(`  Total Supply:     ${totalSupply.toLocaleString()}`);
+  console.log(`  Buy Tax:          ${buyTax / 100}%`);
+  console.log(`  Sell Tax:         ${sellTax / 100}%`);
+  console.log(`  Tax Shares:       LP:20% | Marketing:40% | Team:20% | Burn:20%`);
   console.log("========================================\n");
 
   // 部署
@@ -44,41 +41,28 @@ async function main() {
   console.log("Deployment successful!");
   console.log(`  Contract: ${contractAddress}\n`);
 
-  // 验证
-  const n = await token.name();
-  const s = await token.symbol();
-  const ts = await token.totalSupply();
-  const bt = await token.buyTax();
-  const st = await token.sellTax();
-  const trading = await token.tradingEnabled();
-  const maxTx = await token.maxTransactionAmount();
-  const maxWallet = await token.maxWalletAmount();
-
+  // 验证部署状态
   console.log("Contract State:");
-  console.log(`  name(): ${n}`);
-  console.log(`  symbol(): ${s}`);
-  console.log(`  totalSupply(): ${ethers.formatEther(ts)}`);
-  console.log(`  buyTax(): ${bt} (${Number(bt) / 100}%)`);
-  console.log(`  sellTax(): ${st} (${Number(st) / 100}%)`);
-  console.log(`  tradingEnabled: ${trading}`);
-  console.log(`  maxTransactionAmount: ${ethers.formatEther(maxTx)}`);
-  console.log(`  maxWalletAmount: ${ethers.formatEther(maxWallet)}`);
+  console.log(`  name(): ${await token.name()}`);
+  console.log(`  symbol(): ${await token.symbol()}`);
+  console.log(`  totalSupply(): ${ethers.formatEther(await token.totalSupply())}`);
+  console.log(`  buyTax(): ${await token.buyTax()} (${Number(await token.buyTax()) / 100}%)`);
+  console.log(`  sellTax(): ${await token.sellTax()} (${Number(await token.sellTax()) / 100}%)`);
+  console.log(`  burnShare(): ${await token.burnShare()} (${Number(await token.burnShare()) / 100}%)`);
+  console.log(`  tradingEnabled: ${await token.tradingEnabled()}`);
+  console.log(`  swapAndLiquifyEnabled: ${await token.swapAndLiquifyEnabled()}`);
+  console.log(`  swapThreshold: ${ethers.formatEther(await token.swapThreshold())}`);
   console.log(`  balanceOf(deployer): ${ethers.formatEther(await token.balanceOf(deployer.address))}\n`);
 
-  // 启用交易
-  console.log("Enabling trading...");
-  const tx = await token.enableTrading();
-  await tx.wait();
-  console.log(`  tradingEnabled: ${await token.tradingEnabled()}\n`);
-
-  // 测试转账
-  console.log("Testing transfer (100 tokens)...");
-  const [_, addr1] = await ethers.getSigners();
-  await token.transfer(addr1.address, ethers.parseEther("100"));
-  console.log(`  balanceOf(addr1): ${ethers.formatEther(await token.balanceOf(addr1.address))}`);
-
-  console.log("\nDone! MemeToken is ready.");
-  console.log(`  下一步: 设置 Uniswap Pair → await token.setUniswapPair(pairAddress)`);
+  // 配置 Uniswap Router（Sepolia 或 Mainnet 地址）
+  // Sepolia: 0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008
+  // Mainnet: 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
+  console.log("Next steps:");
+  console.log("  1. await token.setUniswapRouter(routerAddress)");
+  console.log("  2. 在 Uniswap 创建交易对 (token ↔ WETH)");
+  console.log("  3. await token.setUniswapPair(pairAddress)");
+  console.log("  4. await token.enableTrading()");
+  console.log("  5. 公开交易!");
 }
 
 main().catch((error) => {

@@ -4,61 +4,81 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+// Uniswap V2 Router 最小接口
+interface IUniswapV2Router02 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function addLiquidityETH(
+        address token,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
+}
+
 contract MemeToken is ERC20, Ownable {
     // ============ 税费配置 ============
-    // 采用基点制（basis points）：100 = 1%，10000 = 100%
     uint256 public buyTax;
     uint256 public sellTax;
-    uint256 public constant MAX_TAX = 2500; // 最高 25%
+    uint256 public constant MAX_TAX = 2500;
 
-    // 税费分配比例（基点制，三项之和 = 10000）
-    uint256 public liquidityShare = 3000; // 30% → 累积在合约中，用于后续自动做市
-    uint256 public marketingShare = 5000; // 50% → 转入营销钱包
-    uint256 public teamShare = 2000; // 20% → 转入团队钱包
+    uint256 public liquidityShare = 2000; // 20%
+    uint256 public marketingShare = 4000; // 40%
+    uint256 public teamShare = 2000; // 20%
+    uint256 public burnShare = 2000; // 20%
+    // 以上四项之和 = 10000
 
-    // 税费接收地址
     address public marketingWallet;
     address public teamWallet;
 
     // ============ 排除地址 ============
-    // 免税费地址（DEX 合约、部署者等）
     mapping(address => bool) public isExcludedFromFee;
 
     // ============ 交易限制 ============
-    uint256 public maxTransactionAmount; // 单笔最大交易量
-    uint256 public maxWalletAmount; // 单个钱包最大持仓
-    bool public limitsEnabled = true; // 限制开关
-    mapping(address => bool) public isExcludedFromLimits; // 不受限制的地址
+    uint256 public maxTransactionAmount;
+    uint256 public maxWalletAmount;
+    bool public limitsEnabled = true;
+    mapping(address => bool) public isExcludedFromLimits;
 
     // ============ 防机器人 / 交易控制 ============
-    bool public tradingEnabled; // 交易开关（初始关闭）
-    mapping(address => bool) public isWhitelisted; // 白名单地址（不受交易开关限制）
+    bool public tradingEnabled;
+    mapping(address => bool) public isWhitelisted;
 
     // ============ Uniswap 集成 ============
-    address public uniswapV2Pair; // 交易对地址（部署后设置）
+    IUniswapV2Router02 public uniswapV2Router;
+    address public uniswapV2Pair;
 
-    // ============ SwapAndLiquify 预留 ============
-    uint256 public accumulatedForLiquidity; // 累积的 LP 税费（本课先累计，第4课实现自动做市）
-    uint256 public swapThreshold; // 触发自动做市阈值
+    // ============ SwapAndLiquify ============
+    uint256 public accumulatedForLiquidity;
+    uint256 public swapThreshold;
     bool public swapAndLiquifyEnabled = true;
-    bool private _inSwap; // 重入锁
-    modifier lockSwap() {
-        _inSwap = true;
-        _;
-        _inSwap = false;
-    }
+    bool private _inSwap;
 
     // ============ 事件 ============
     event TaxCharged(address indexed from, address indexed to, uint256 taxAmount, bool isSell);
-    event TaxDistributed(uint256 marketing, uint256 liquidity, uint256 team);
+    event TaxDistributed(uint256 marketing, uint256 liquidity, uint256 team, uint256 burned);
     event ExcludedFromFee(address indexed account, bool excluded);
     event ExcludedFromLimits(address indexed account, bool excluded);
     event LimitsUpdated(uint256 maxTransaction, uint256 maxWallet, bool enabled);
     event TradingToggled(bool enabled);
     event WhitelistUpdated(address indexed account, bool whitelisted);
     event TaxUpdated(uint256 oldBuyTax, uint256 newBuyTax, uint256 oldSellTax, uint256 newSellTax);
+    event TaxSharesUpdated(uint256 liquidity, uint256 marketing, uint256 team, uint256 burn);
     event WalletsUpdated(address marketing, address team);
-    event UniswapPairSet(address pair);
+    event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiquidity);
+    event ManualSwapTriggered(address indexed caller);
+    event UniswapRouterSet(address router);
 
     // ============ 构造函数 ============
     constructor(
@@ -80,12 +100,10 @@ contract MemeToken is ERC20, Ownable {
         sellTax = _sellTax;
 
         uint256 supply = _totalSupply * 10 ** decimals();
-        // 默认限制：单笔最多 2% 总量，钱包最多 2% 总量
         maxTransactionAmount = supply / 50;
         maxWalletAmount = supply / 50;
-        swapThreshold = supply / 1000; // 累积 0.1% 后触发
+        swapThreshold = supply / 1000;
 
-        // 部署者与合约自身免税费、免限制
         isExcludedFromFee[msg.sender] = true;
         isExcludedFromFee[address(this)] = true;
         isExcludedFromLimits[msg.sender] = true;
@@ -98,7 +116,6 @@ contract MemeToken is ERC20, Ownable {
     // ============ 核心：转账钩子 ============
 
     function _update(address from, address to, uint256 amount) internal override {
-        // 铸造 / 销毁 不做任何检查，直接走父合约
         if (from == address(0) || to == address(0)) {
             super._update(from, to, amount);
             return;
@@ -113,35 +130,31 @@ contract MemeToken is ERC20, Ownable {
         if (limitsEnabled && !isExcludedFromLimits[from] && !isExcludedFromLimits[to]) {
             require(amount <= maxTransactionAmount, "exceeds max transaction");
             if (to != uniswapV2Pair) {
-                require(
-                    balanceOf(to) + amount <= maxWalletAmount,
-                    "exceeds max wallet"
-                );
+                require(balanceOf(to) + amount <= maxWalletAmount, "exceeds max wallet");
             }
         }
 
         // ── 3. 税费计算与扣取 ──
-        bool shouldTakeFee = !_inSwap && // 自动做市本身不收税
+        bool shouldTakeFee = !_inSwap &&
             !isExcludedFromFee[from] &&
             !isExcludedFromFee[to] &&
-            (from == uniswapV2Pair || to == uniswapV2Pair); // 只有买卖才收税
+            (from == uniswapV2Pair || to == uniswapV2Pair);
 
         if (shouldTakeFee) {
             bool isSell = (to == uniswapV2Pair);
             uint256 taxRate = isSell ? sellTax : buyTax;
-            uint256 taxAmount;
 
             if (taxRate > 0) {
-                taxAmount = (amount * taxRate) / 10000;
+                uint256 taxAmount = (amount * taxRate) / 10000;
                 uint256 netAmount = amount - taxAmount;
 
-                // 税费先转入合约
                 super._update(from, address(this), taxAmount);
 
-                // 分配税费
+                // 分配税费（四路：营销 / 团队 / LP / 燃烧）
                 uint256 marketingAmount = (taxAmount * marketingShare) / 10000;
                 uint256 teamAmount = (taxAmount * teamShare) / 10000;
-                uint256 liquidityAmount = taxAmount - marketingAmount - teamAmount;
+                uint256 liquidityAmount = (taxAmount * liquidityShare) / 10000;
+                uint256 burnAmount = taxAmount - marketingAmount - teamAmount - liquidityAmount;
 
                 if (marketingAmount > 0) {
                     super._update(address(this), marketingWallet, marketingAmount);
@@ -149,29 +162,113 @@ contract MemeToken is ERC20, Ownable {
                 if (teamAmount > 0) {
                     super._update(address(this), teamWallet, teamAmount);
                 }
+                if (burnAmount > 0) {
+                    super._update(address(this), address(0), burnAmount);
+                }
 
                 accumulatedForLiquidity += liquidityAmount;
                 emit TaxCharged(from, to, taxAmount, isSell);
-                emit TaxDistributed(marketingAmount, liquidityAmount, teamAmount);
+                emit TaxDistributed(marketingAmount, liquidityAmount, teamAmount, burnAmount);
 
-                // 净额转给目标
                 super._update(from, to, netAmount);
+
+                // ── 4. 尝试触发自动做市 ──
+                if (isSell) {
+                    _trySwapAndLiquify();
+                }
                 return;
             }
         }
 
         super._update(from, to, amount);
+
+        // ── 非税转账也尝试触发（防止税费累积后首次转账才触发）──
+        if (!_inSwap && to == uniswapV2Pair && !isExcludedFromFee[from]) {
+            _trySwapAndLiquify();
+        }
     }
 
-    // ── 自动做市触发（本课预留接口，第4课完善） ──
+    // ============ SwapAndLiquify 核心实现 ============
 
     function _trySwapAndLiquify() private {
-        // 第4课将实现完整逻辑：
-        // 当 accumulatedForLiquidity >= swapThreshold 时
-        // 自动卖出 50% → 添加流动性
+        if (
+            accumulatedForLiquidity >= swapThreshold &&
+            swapAndLiquifyEnabled &&
+            !_inSwap &&
+            address(uniswapV2Router) != address(0)
+        ) {
+            uint256 half = accumulatedForLiquidity / 2;
+            uint256 otherHalf = accumulatedForLiquidity - half;
+            accumulatedForLiquidity = 0;
+
+            _inSwap = true;
+
+            uint256 ethBefore = address(this).balance;
+            _swapTokensForEth(half);
+            uint256 ethReceived = address(this).balance - ethBefore;
+
+            if (ethReceived > 0 && otherHalf > 0) {
+                _addLiquidity(otherHalf, ethReceived);
+            }
+
+            _inSwap = false;
+
+            emit SwapAndLiquify(half, ethReceived, otherHalf);
+        }
     }
 
+    function _swapTokensForEth(uint256 tokenAmount) private {
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapV2Router.WETH();
+
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0, // 接受任何数量的 ETH
+            path,
+            address(this),
+            block.timestamp
+        );
+    }
+
+    function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        uniswapV2Router.addLiquidityETH{value: ethAmount}(
+            address(this),
+            tokenAmount,
+            0, // 接受任意滑点
+            0,
+            address(this), // LP Token 留在合约中（第10课实现锁仓）
+            block.timestamp
+        );
+    }
+
+    // ── 手动触发（owner 可随时调用）──
+    function triggerManualSwap() external onlyOwner {
+        require(accumulatedForLiquidity >= swapThreshold, "below threshold");
+        emit ManualSwapTriggered(msg.sender);
+        _trySwapAndLiquify();
+    }
+
+    // ── 接收 ETH（swap 回款用）──
+    receive() external payable {}
+
     // ============ Owner 管理函数 ============
+
+    function setUniswapRouter(address _router) external onlyOwner {
+        require(_router != address(0), "zero router");
+        uniswapV2Router = IUniswapV2Router02(_router);
+        emit UniswapRouterSet(_router);
+    }
+
+    function setUniswapPair(address _pair) external onlyOwner {
+        require(_pair != address(0), "zero pair");
+        uniswapV2Pair = _pair;
+        isExcludedFromLimits[_pair] = true;
+    }
 
     function enableTrading() external onlyOwner {
         tradingEnabled = true;
@@ -195,12 +292,18 @@ contract MemeToken is ERC20, Ownable {
     function setTaxShares(
         uint256 _liquidityShare,
         uint256 _marketingShare,
-        uint256 _teamShare
+        uint256 _teamShare,
+        uint256 _burnShare
     ) external onlyOwner {
-        require(_liquidityShare + _marketingShare + _teamShare == 10000, "shares != 100%");
+        require(
+            _liquidityShare + _marketingShare + _teamShare + _burnShare == 10000,
+            "shares != 100%"
+        );
         liquidityShare = _liquidityShare;
         marketingShare = _marketingShare;
         teamShare = _teamShare;
+        burnShare = _burnShare;
+        emit TaxSharesUpdated(_liquidityShare, _marketingShare, _teamShare, _burnShare);
     }
 
     function setWallets(address _marketing, address _team) external onlyOwner {
@@ -230,13 +333,6 @@ contract MemeToken is ERC20, Ownable {
     function setWhitelist(address _account, bool _whitelisted) external onlyOwner {
         isWhitelisted[_account] = _whitelisted;
         emit WhitelistUpdated(_account, _whitelisted);
-    }
-
-    function setUniswapPair(address _pair) external onlyOwner {
-        require(_pair != address(0), "zero pair");
-        uniswapV2Pair = _pair;
-        isExcludedFromLimits[_pair] = true;
-        emit UniswapPairSet(_pair);
     }
 
     function setSwapThreshold(uint256 _threshold) external onlyOwner {

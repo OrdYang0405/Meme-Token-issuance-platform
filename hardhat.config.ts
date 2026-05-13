@@ -4,10 +4,15 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-const { SEPOLIA_RPC_URL, PRIVATE_KEY, ETHERSCAN_API_KEY } = process.env;
+const { SEPOLIA_RPC_URL, MAINNET_RPC_URL, PRIVATE_KEY, ETHERSCAN_API_KEY } = process.env;
 
 const networks: HardhatUserConfig["networks"] = {
-  hardhat: { chainId: 31337 },
+  hardhat: {
+    chainId: 31337,
+    forking: MAINNET_RPC_URL
+      ? { url: MAINNET_RPC_URL, blockNumber: 19221000 }
+      : undefined,
+  },
 };
 
 if (SEPOLIA_RPC_URL && PRIVATE_KEY && PRIVATE_KEY.length === 64) {

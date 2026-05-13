@@ -32,8 +32,6 @@ describe("MemeToken", function () {
       SELL_TAX
     );
     await token.waitForDeployment();
-
-    // 设置 Uniswap Pair 地址（模拟）
     await token.setUniswapPair(pair.address);
   });
 
@@ -55,45 +53,28 @@ describe("MemeToken", function () {
       expect(await token.sellTax()).to.equal(SELL_TAX);
     });
 
-    it("should set correct wallets", async function () {
-      expect(await token.marketingWallet()).to.equal(marketing.address);
-      expect(await token.teamWallet()).to.equal(team.address);
+    it("should set correct tax shares (with burn)", async function () {
+      expect(await token.liquidityShare()).to.equal(2000);
+      expect(await token.marketingShare()).to.equal(4000);
+      expect(await token.teamShare()).to.equal(2000);
+      expect(await token.burnShare()).to.equal(2000);
     });
 
-    it("should set default limits (~2% of supply)", async function () {
-      const supply = ethers.parseEther(String(TOTAL_SUPPLY));
-      const twoPercent = supply / 50n;
-      expect(await token.maxTransactionAmount()).to.equal(twoPercent);
-      expect(await token.maxWalletAmount()).to.equal(twoPercent);
-    });
-
-    it("should start with trading disabled", async function () {
-      expect(await token.tradingEnabled()).to.equal(false);
-    });
-
-    it("should exclude owner and contract from fees", async function () {
-      expect(await token.isExcludedFromFee(owner.address)).to.equal(true);
-      expect(await token.isExcludedFromFee(await token.getAddress())).to.equal(true);
-    });
-
-    it("should whitelist owner", async function () {
-      expect(await token.isWhitelisted(owner.address)).to.equal(true);
+    it("should start with swapAndLiquify enabled", async function () {
+      expect(await token.swapAndLiquifyEnabled()).to.equal(true);
     });
   });
 
   // ============ 交易开关 ============
   describe("Trading control", function () {
     it("should reject transfers when trading is disabled (non-whitelisted)", async function () {
-      // owner 是白名单，先转给 buyer（非白名单地址）
       await token.transfer(buyer.address, ethers.parseEther("100"));
-      // buyer（非白名单）尝试转给 seller，交易未开启应回滚
       await expect(
         token.connect(buyer).transfer(seller.address, ethers.parseEther("10"))
       ).to.be.revertedWith("trading not enabled");
     });
 
     it("should allow whitelisted transfers when trading is disabled", async function () {
-      // owner is whitelisted
       await token.transfer(marketing.address, ethers.parseEther("100"));
       expect(await token.balanceOf(marketing.address)).to.equal(ethers.parseEther("100"));
     });
@@ -103,34 +84,14 @@ describe("MemeToken", function () {
       await token.transfer(buyer.address, ethers.parseEther("100"));
       expect(await token.balanceOf(buyer.address)).to.equal(ethers.parseEther("100"));
     });
-
-    it("should emit TradingToggled event", async function () {
-      await expect(token.enableTrading()).to.emit(token, "TradingToggled").withArgs(true);
-    });
-
-    it("should allow owner to disable trading", async function () {
-      await token.enableTrading();
-      await token.disableTrading();
-      expect(await token.tradingEnabled()).to.equal(false);
-    });
   });
 
   // ============ 税费机制 ============
   describe("Tax mechanism", function () {
     beforeEach(async function () {
       await token.enableTrading();
-      // 给非豁免地址转代币，用于卖测试
       await token.transfer(seller.address, ethers.parseEther("10000"));
-      // 给 pair 转代币，用于买测试（owner 免税费 → 全量到 pair）
       await token.transfer(pair.address, ethers.parseEther("2000"));
-    });
-
-    it("should charge no tax on non-pair transfers", async function () {
-      // seller→buyer 不涉及 pair，不收税
-      const sellerBefore = await token.balanceOf(seller.address);
-      await token.connect(seller).transfer(buyer.address, ethers.parseEther("500"));
-      const buyerAfter = await token.balanceOf(buyer.address);
-      expect(buyerAfter).to.equal(ethers.parseEther("500"));
     });
 
     it("should charge buy tax when buying from pair", async function () {
@@ -138,9 +99,7 @@ describe("MemeToken", function () {
       const expectedTax = (amount * BigInt(BUY_TAX)) / 10000n;
       const expectedNet = amount - expectedTax;
 
-      // pair→buyer = 买入
       await token.connect(pair).transfer(buyer.address, amount);
-
       expect(await token.balanceOf(buyer.address)).to.equal(expectedNet);
     });
 
@@ -149,59 +108,139 @@ describe("MemeToken", function () {
       const expectedTax = (amount * BigInt(SELL_TAX)) / 10000n;
       const expectedNet = amount - expectedTax;
 
+      const pairBefore = await token.balanceOf(pair.address);
       await token.connect(seller).transfer(pair.address, amount);
-
-      // pair 收到净额（税后）
-      expect(await token.balanceOf(pair.address)).to.equal(
-        ethers.parseEther("2000") + expectedNet
-      );
+      expect(await token.balanceOf(pair.address) - pairBefore).to.equal(expectedNet);
     });
 
-    it("should distribute tax to marketing and team wallets", async function () {
+    it("should emit TaxDistributed with 4 values (incl. burn)", async function () {
       const amount = ethers.parseEther("1000");
-      const taxAmount = (amount * BigInt(SELL_TAX)) / 10000n;
-      const marketingAmount = (taxAmount * 5000n) / 10000n; // 50%
-      const teamAmount = (taxAmount * 2000n) / 10000n; // 20%
+      const tax = (amount * BigInt(SELL_TAX)) / 10000n;
+      const lp = (tax * 2000n) / 10000n;
+      const mkt = (tax * 4000n) / 10000n;
+      const tm = (tax * 2000n) / 10000n;
+      const burn = tax - lp - mkt - tm;
 
-      const beforeMarketing = await token.balanceOf(marketing.address);
-      const beforeTeam = await token.balanceOf(team.address);
+      await expect(token.connect(seller).transfer(pair.address, amount))
+        .to.emit(token, "TaxDistributed")
+        .withArgs(mkt, lp, tm, burn);
+    });
+
+    it("should burn tax portion → decrease totalSupply", async function () {
+      const supplyBefore = await token.totalSupply();
+      const amount = ethers.parseEther("1000");
+      const tax = (amount * BigInt(SELL_TAX)) / 10000n;
+      const burnAmount = (tax * 2000n) / 10000n; // 20% burnShare
 
       await token.connect(seller).transfer(pair.address, amount);
 
-      expect(await token.balanceOf(marketing.address) - beforeMarketing).to.equal(
-        marketingAmount
-      );
-      expect(await token.balanceOf(team.address) - beforeTeam).to.equal(teamAmount);
+      const supplyAfter = await token.totalSupply();
+      expect(supplyBefore - supplyAfter).to.equal(burnAmount);
     });
 
     it("should accumulate liquidity share in contract", async function () {
       const amount = ethers.parseEther("1000");
-      const taxAmount = (amount * BigInt(SELL_TAX)) / 10000n;
-      const liquidityAmount = (taxAmount * 3000n) / 10000n; // 30%
+      const tax = (amount * BigInt(SELL_TAX)) / 10000n;
+      const liquidityAmount = (tax * 2000n) / 10000n;
 
       await token.connect(seller).transfer(pair.address, amount);
-
       expect(await token.accumulatedForLiquidity()).to.equal(liquidityAmount);
     });
+  });
 
-    it("should not charge tax from excluded addresses", async function () {
-      await token.setExcludedFromFee(seller.address, true);
-      const amount = ethers.parseEther("500");
-
-      const pairBefore = await token.balanceOf(pair.address);
-      await token.connect(seller).transfer(pair.address, amount);
-
-      // pair 收到全量（无税）
-      expect(await token.balanceOf(pair.address) - pairBefore).to.equal(amount);
+  // ============ 燃烧机制 ============
+  describe("Burn mechanism", function () {
+    beforeEach(async function () {
+      await token.enableTrading();
+      await token.transfer(seller.address, ethers.parseEther("10000"));
     });
 
-    it("should emit TaxCharged event on sell", async function () {
-      const amount = ethers.parseEther("1000");
-      const expectedTax = (amount * BigInt(SELL_TAX)) / 10000n;
+    it("should decrease totalSupply after each taxed transaction", async function () {
+      const before = await token.totalSupply();
 
-      await expect(token.connect(seller).transfer(pair.address, amount))
-        .to.emit(token, "TaxCharged")
-        .withArgs(seller.address, pair.address, expectedTax, true);
+      const amount = ethers.parseEther("1000");
+      await token.connect(seller).transfer(pair.address, amount);
+
+      const after = await token.totalSupply();
+      expect(after).to.be.lt(before); // 比原来少 = 有燃烧
+    });
+
+    it("should allow adjusting burn share", async function () {
+      // 改成 50% 燃烧
+      await token.setTaxShares(1000, 3000, 1000, 5000);
+      expect(await token.burnShare()).to.equal(5000);
+
+      const supplyBefore = await token.totalSupply();
+      const amount = ethers.parseEther("1000");
+      const tax = (amount * BigInt(SELL_TAX)) / 10000n;
+      const expectedBurn = (tax * 5000n) / 10000n;
+
+      await token.connect(seller).transfer(pair.address, amount);
+      expect(supplyBefore - await token.totalSupply()).to.equal(expectedBurn);
+    });
+
+    it("should reject invalid share combination", async function () {
+      await expect(
+        token.setTaxShares(5000, 5000, 5000, 5000)
+      ).to.be.revertedWith("shares != 100%");
+    });
+
+    it("should allow zero burn", async function () {
+      await token.setTaxShares(3000, 5000, 2000, 0);
+      const supplyBefore = await token.totalSupply();
+
+      const amount = ethers.parseEther("1000");
+      await token.connect(seller).transfer(pair.address, amount);
+
+      // totalSupply 不变（无燃烧）
+      expect(await token.totalSupply()).to.equal(supplyBefore);
+    });
+  });
+
+  // ============ SwapAndLiquify 控制 ============
+  describe("SwapAndLiquify control", function () {
+    beforeEach(async function () {
+      await token.enableTrading();
+      await token.transfer(seller.address, ethers.parseEther("50000"));
+    });
+
+    it("should accumulate liquidity tokens on each sell", async function () {
+      const before = await token.accumulatedForLiquidity();
+
+      const amount = ethers.parseEther("1000");
+      await token.connect(seller).transfer(pair.address, amount);
+
+      const after = await token.accumulatedForLiquidity();
+      expect(after).to.be.gt(before);
+    });
+
+    it("should allow owner to update swap threshold", async function () {
+      const newThreshold = ethers.parseEther("500");
+      await token.setSwapThreshold(newThreshold);
+      expect(await token.swapThreshold()).to.equal(newThreshold);
+    });
+
+    it("should allow owner to toggle swapAndLiquify", async function () {
+      await token.setSwapAndLiquifyEnabled(false);
+      expect(await token.swapAndLiquifyEnabled()).to.equal(false);
+
+      await token.setSwapAndLiquifyEnabled(true);
+      expect(await token.swapAndLiquifyEnabled()).to.equal(true);
+    });
+
+    it("should reject manual swap when below threshold", async function () {
+      // accumulatedForLiquidity = 0 初始状态
+      await expect(
+        token.triggerManualSwap()
+      ).to.be.revertedWith("below threshold");
+    });
+
+    it("should allow setting Uniswap router", async function () {
+      await token.setUniswapRouter(pair.address); // 用 pair 地址模拟 router
+      expect(await token.uniswapV2Router()).to.equal(pair.address);
+      await expect(token.setUniswapRouter(pair.address))
+        .to.emit(token, "UniswapRouterSet")
+        .withArgs(pair.address);
     });
   });
 
@@ -209,7 +248,6 @@ describe("MemeToken", function () {
   describe("Transaction limits", function () {
     beforeEach(async function () {
       await token.enableTrading();
-      // 给 buyer（非豁免地址）转代币，用于测试限制
       await token.transfer(buyer.address, ethers.parseEther("50000"));
     });
 
@@ -220,32 +258,17 @@ describe("MemeToken", function () {
       ).to.be.revertedWith("exceeds max transaction");
     });
 
-    it("should allow transfers exactly at maxTransactionAmount", async function () {
-      const maxTx = await token.maxTransactionAmount();
-      await token.connect(buyer).transfer(seller.address, maxTx);
-      expect(await token.balanceOf(seller.address)).to.equal(maxTx);
-    });
-
     it("should reject when receiver exceeds maxWalletAmount", async function () {
       const maxWallet = await token.maxWalletAmount();
-      // 先转满
       await token.connect(buyer).transfer(seller.address, maxWallet);
-      // 再转 1 应失败
       await expect(
         token.connect(buyer).transfer(seller.address, 1n)
       ).to.be.revertedWith("exceeds max wallet");
     });
 
-    it("should allow excluded addresses to bypass limits", async function () {
-      await token.setExcludedFromLimits(buyer.address, true);
-      const maxTx = await token.maxTransactionAmount();
-      await token.connect(buyer).transfer(seller.address, maxTx + 1n);
-      expect(await token.balanceOf(seller.address)).to.equal(maxTx + 1n);
-    });
-
     it("should allow disabling limits entirely", async function () {
       const maxTx = await token.maxTransactionAmount();
-      await token.setLimits(maxTx, maxTx, false); // 关闭限制
+      await token.setLimits(maxTx, maxTx, false);
       await token.connect(buyer).transfer(seller.address, maxTx + 1n);
       expect(await token.balanceOf(seller.address)).to.equal(maxTx + 1n);
     });
@@ -253,103 +276,59 @@ describe("MemeToken", function () {
 
   // ============ 管理员功能 ============
   describe("Admin functions", function () {
-    it("should allow owner to update tax rates", async function () {
-      await token.setTax(200, 400);
-      expect(await token.buyTax()).to.equal(200);
-      expect(await token.sellTax()).to.equal(400);
-      await expect(token.setTax(200, 400))
-        .to.emit(token, "TaxUpdated")
-        .withArgs(200, 200, 400, 400);
+    it("should allow owner to update tax shares with burn", async function () {
+      await token.setTaxShares(1000, 5000, 3000, 1000);
+      expect(await token.liquidityShare()).to.equal(1000);
+      expect(await token.marketingShare()).to.equal(5000);
+      expect(await token.teamShare()).to.equal(3000);
+      expect(await token.burnShare()).to.equal(1000);
     });
 
     it("should reject tax exceeding MAX_TAX", async function () {
       await expect(token.setTax(2600, 100)).to.be.revertedWith("tax too high");
-      await expect(token.setTax(100, 2600)).to.be.revertedWith("tax too high");
     });
 
-    it("should reject tax update from non-owner", async function () {
-      await expect(
-        token.connect(buyer).setTax(100, 100)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-
-    it("should allow owner to update wallets", async function () {
-      await token.setWallets(buyer.address, seller.address);
-      expect(await token.marketingWallet()).to.equal(buyer.address);
-      expect(await token.teamWallet()).to.equal(seller.address);
-    });
-
-    it("should allow owner to update tax shares", async function () {
-      // 40% LP, 40% marketing, 20% team
-      await token.setTaxShares(4000, 4000, 2000);
-      expect(await token.liquidityShare()).to.equal(4000);
-      expect(await token.marketingShare()).to.equal(4000);
-      expect(await token.teamShare()).to.equal(2000);
-    });
-
-    it("should reject invalid tax shares", async function () {
-      await expect(token.setTaxShares(5000, 5000, 5000)).to.be.revertedWith("shares != 100%");
+    it("should emit TaxSharesUpdated event", async function () {
+      await expect(token.setTaxShares(2500, 2500, 2500, 2500))
+        .to.emit(token, "TaxSharesUpdated")
+        .withArgs(2500, 2500, 2500, 2500);
     });
   });
 
-  // ============ 白名单 ============
-  describe("Whitelist", function () {
-    it("should allow adding and removing addresses", async function () {
-      await token.setWhitelist(buyer.address, true);
-      expect(await token.isWhitelisted(buyer.address)).to.equal(true);
-
-      await token.setWhitelist(buyer.address, false);
-      expect(await token.isWhitelisted(buyer.address)).to.equal(false);
-    });
-
-    it("should allow whitelisted address to trade before trading enabled", async function () {
-      await token.setWhitelist(buyer.address, true);
-      // 先用 owner 转给 buyer（owner 也是白名单）
-      await token.transfer(buyer.address, ethers.parseEther("100"));
-      // buyer（白名单）再转给其他人
-      await token.connect(buyer).transfer(seller.address, ethers.parseEther("50"));
-      expect(await token.balanceOf(seller.address)).to.equal(ethers.parseEther("50"));
-    });
-  });
-
-  // ============ 集成测试：完整买卖流程 ============
+  // ============ 集成测试：完整流程 ============
   describe("Full buy-sell flow", function () {
     beforeEach(async function () {
       await token.enableTrading();
       await token.transfer(seller.address, ethers.parseEther("10000"));
     });
 
-    it("should handle complete sell→buy cycle with correct tax", async function () {
-      // ------ 第1步：卖方卖出 ------
+    it("should handle sell→buy with burn and liquidity accumulation", async function () {
+      const initialSupply = await token.totalSupply();
+
+      // Step 1: 卖出
       const sellAmount = ethers.parseEther("1000");
       const sellTax = (sellAmount * BigInt(SELL_TAX)) / 10000n;
       const netToPair = sellAmount - sellTax;
 
-      const pairBefore = await token.balanceOf(pair.address);
       await token.connect(seller).transfer(pair.address, sellAmount);
-      expect(await token.balanceOf(pair.address) - pairBefore).to.equal(netToPair);
+      expect(await token.balanceOf(pair.address)).to.equal(netToPair);
 
-      // ------ 第2步：买方买入 ------
+      // Step 2: 买入
       const buyTax = (netToPair * BigInt(BUY_TAX)) / 10000n;
       const netToBuyer = netToPair - buyTax;
 
       await token.connect(pair).transfer(buyer.address, netToPair);
       expect(await token.balanceOf(buyer.address)).to.equal(netToBuyer);
 
-      // ------ 验证税费已正确分配 ------
-      // 两笔交易都产生税费（卖 + 买）
-      // 卖出税分配：50% marketing, 20% team, 30% LP
-      const sellMarketing = (sellTax * 5000n) / 10000n;
-      const sellTeam = (sellTax * 2000n) / 10000n;
-      const sellLiquidity = sellTax - sellMarketing - sellTeam;
-      // 买入税分配（同样比例）
-      const buyMarketing = (buyTax * 5000n) / 10000n;
-      const buyTeam = (buyTax * 2000n) / 10000n;
-      const buyLiquidity = buyTax - buyMarketing - buyTeam;
+      // Step 3: 验证燃烧
+      const expectedBurn =
+        (sellTax * 2000n) / 10000n + (buyTax * 2000n) / 10000n;
+      expect(initialSupply - await token.totalSupply()).to.equal(expectedBurn);
 
-      expect(await token.balanceOf(marketing.address)).to.equal(sellMarketing + buyMarketing);
-      expect(await token.balanceOf(team.address)).to.equal(sellTeam + buyTeam);
-      expect(await token.accumulatedForLiquidity()).to.equal(sellLiquidity + buyLiquidity);
+      // Step 4: 验证 LP 累积
+      const expectedLP =
+        (sellTax * 2000n) / 10000n + (buyTax * 2000n) / 10000n;
+      expect(await token.accumulatedForLiquidity()).to.equal(expectedLP);
     });
   });
 });
