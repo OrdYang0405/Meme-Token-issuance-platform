@@ -2,9 +2,10 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
-// Uniswap V2 Router 最小接口
 interface IUniswapV2Router02 {
     function factory() external pure returns (address);
     function WETH() external pure returns (address);
@@ -27,20 +28,25 @@ interface IUniswapV2Router02 {
     ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
 }
 
-contract MemeToken is ERC20, Ownable {
+contract MemeToken is ERC20, Ownable2Step, Pausable {
     // ============ 税费配置 ============
     uint256 public buyTax;
     uint256 public sellTax;
-    uint256 public constant MAX_TAX = 2500;
+    uint256 public constant MAX_TAX = 2500; // 最高 25%
 
-    uint256 public liquidityShare = 2000; // 20%
-    uint256 public marketingShare = 4000; // 40%
-    uint256 public teamShare = 2000; // 20%
-    uint256 public burnShare = 2000; // 20%
-    // 以上四项之和 = 10000
+    uint256 public liquidityShare = 2000;
+    uint256 public marketingShare = 4000;
+    uint256 public teamShare = 2000;
+    uint256 public burnShare = 2000;
 
     address public marketingWallet;
     address public teamWallet;
+
+    // ── 参数更新频率锁 ──
+    uint256 public constant TAX_COOLDOWN = 1 days;
+    uint256 public lastTaxUpdateTime;
+    uint256 public lastShareUpdateTime;
+    uint256 public constant SHARE_COOLDOWN = 1 days;
 
     // ============ 排除地址 ============
     mapping(address => bool) public isExcludedFromFee;
@@ -79,6 +85,8 @@ contract MemeToken is ERC20, Ownable {
     event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiquidity);
     event ManualSwapTriggered(address indexed caller);
     event UniswapRouterSet(address router);
+    event RescueETH(address indexed to, uint256 amount);
+    event RescueToken(address indexed token, address indexed to, uint256 amount);
 
     // ============ 构造函数 ============
     constructor(
@@ -121,12 +129,17 @@ contract MemeToken is ERC20, Ownable {
             return;
         }
 
-        // ── 1. 交易开关检查 ──
+        // ── 暂停检查（白名单地址不受暂停影响）──
+        if (paused() && !isWhitelisted[from] && !isWhitelisted[to]) {
+            revert("token transfers paused");
+        }
+
+        // ── 交易开关检查 ──
         if (!tradingEnabled) {
             require(isWhitelisted[from] || isWhitelisted[to], "trading not enabled");
         }
 
-        // ── 2. 交易限制检查 ──
+        // ── 交易限制检查 ──
         if (limitsEnabled && !isExcludedFromLimits[from] && !isExcludedFromLimits[to]) {
             require(amount <= maxTransactionAmount, "exceeds max transaction");
             if (to != uniswapV2Pair) {
@@ -134,7 +147,7 @@ contract MemeToken is ERC20, Ownable {
             }
         }
 
-        // ── 3. 税费计算与扣取 ──
+        // ── 税费计算与扣取 ──
         bool shouldTakeFee = !_inSwap &&
             !isExcludedFromFee[from] &&
             !isExcludedFromFee[to] &&
@@ -150,7 +163,6 @@ contract MemeToken is ERC20, Ownable {
 
                 super._update(from, address(this), taxAmount);
 
-                // 分配税费（四路：营销 / 团队 / LP / 燃烧）
                 uint256 marketingAmount = (taxAmount * marketingShare) / 10000;
                 uint256 teamAmount = (taxAmount * teamShare) / 10000;
                 uint256 liquidityAmount = (taxAmount * liquidityShare) / 10000;
@@ -172,7 +184,6 @@ contract MemeToken is ERC20, Ownable {
 
                 super._update(from, to, netAmount);
 
-                // ── 4. 尝试触发自动做市 ──
                 if (isSell) {
                     _trySwapAndLiquify();
                 }
@@ -182,13 +193,12 @@ contract MemeToken is ERC20, Ownable {
 
         super._update(from, to, amount);
 
-        // ── 非税转账也尝试触发（防止税费累积后首次转账才触发）──
         if (!_inSwap && to == uniswapV2Pair && !isExcludedFromFee[from]) {
             _trySwapAndLiquify();
         }
     }
 
-    // ============ SwapAndLiquify 核心实现 ============
+    // ============ SwapAndLiquify ============
 
     function _trySwapAndLiquify() private {
         if (
@@ -226,7 +236,7 @@ contract MemeToken is ERC20, Ownable {
 
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
-            0, // 接受任何数量的 ETH
+            0,
             path,
             address(this),
             block.timestamp
@@ -239,36 +249,32 @@ contract MemeToken is ERC20, Ownable {
         uniswapV2Router.addLiquidityETH{value: ethAmount}(
             address(this),
             tokenAmount,
-            0, // 接受任意滑点
             0,
-            address(this), // LP Token 留在合约中（第10课实现锁仓）
+            0,
+            address(this),
             block.timestamp
         );
     }
 
-    // ── 手动触发（owner 可随时调用）──
     function triggerManualSwap() external onlyOwner {
         require(accumulatedForLiquidity >= swapThreshold, "below threshold");
         emit ManualSwapTriggered(msg.sender);
         _trySwapAndLiquify();
     }
 
-    // ── 接收 ETH（swap 回款用）──
     receive() external payable {}
 
-    // ============ Owner 管理函数 ============
+    // ============ Pausable 管理 ============
 
-    function setUniswapRouter(address _router) external onlyOwner {
-        require(_router != address(0), "zero router");
-        uniswapV2Router = IUniswapV2Router02(_router);
-        emit UniswapRouterSet(_router);
+    function pause() external onlyOwner {
+        _pause();
     }
 
-    function setUniswapPair(address _pair) external onlyOwner {
-        require(_pair != address(0), "zero pair");
-        uniswapV2Pair = _pair;
-        isExcludedFromLimits[_pair] = true;
+    function unpause() external onlyOwner {
+        _unpause();
     }
+
+    // ============ Owner 管理函数（含频率锁）============
 
     function enableTrading() external onlyOwner {
         tradingEnabled = true;
@@ -282,10 +288,14 @@ contract MemeToken is ERC20, Ownable {
 
     function setTax(uint256 _buyTax, uint256 _sellTax) external onlyOwner {
         require(_buyTax <= MAX_TAX && _sellTax <= MAX_TAX, "tax too high");
+        require(block.timestamp >= lastTaxUpdateTime + TAX_COOLDOWN, "tax cooldown active");
+
         uint256 oldBuy = buyTax;
         uint256 oldSell = sellTax;
         buyTax = _buyTax;
         sellTax = _sellTax;
+        lastTaxUpdateTime = block.timestamp;
+
         emit TaxUpdated(oldBuy, _buyTax, oldSell, _sellTax);
     }
 
@@ -299,10 +309,17 @@ contract MemeToken is ERC20, Ownable {
             _liquidityShare + _marketingShare + _teamShare + _burnShare == 10000,
             "shares != 100%"
         );
+        require(
+            block.timestamp >= lastShareUpdateTime + SHARE_COOLDOWN,
+            "share cooldown active"
+        );
+
         liquidityShare = _liquidityShare;
         marketingShare = _marketingShare;
         teamShare = _teamShare;
         burnShare = _burnShare;
+        lastShareUpdateTime = block.timestamp;
+
         emit TaxSharesUpdated(_liquidityShare, _marketingShare, _teamShare, _burnShare);
     }
 
@@ -335,6 +352,18 @@ contract MemeToken is ERC20, Ownable {
         emit WhitelistUpdated(_account, _whitelisted);
     }
 
+    function setUniswapRouter(address _router) external onlyOwner {
+        require(_router != address(0), "zero router");
+        uniswapV2Router = IUniswapV2Router02(_router);
+        emit UniswapRouterSet(_router);
+    }
+
+    function setUniswapPair(address _pair) external onlyOwner {
+        require(_pair != address(0), "zero pair");
+        uniswapV2Pair = _pair;
+        isExcludedFromLimits[_pair] = true;
+    }
+
     function setSwapThreshold(uint256 _threshold) external onlyOwner {
         swapThreshold = _threshold;
     }
@@ -343,15 +372,18 @@ contract MemeToken is ERC20, Ownable {
         swapAndLiquifyEnabled = _enabled;
     }
 
-    // ============ 紧急资产提取 ============
+    // ============ 紧急资产回收 ============
 
     function rescueETH() external onlyOwner {
-        payable(owner()).transfer(address(this).balance);
+        uint256 amount = address(this).balance;
+        payable(owner()).transfer(amount);
+        emit RescueETH(owner(), amount);
     }
 
     function rescueToken(address _token) external onlyOwner {
         require(_token != address(this), "cannot rescue self");
-        IERC20(_token).transfer(owner(), IERC20(_token).balanceOf(address(this)));
+        uint256 amount = IERC20(_token).balanceOf(address(this));
+        IERC20(_token).transfer(owner(), amount);
+        emit RescueToken(_token, owner(), amount);
     }
 }
-
