@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Hardhat
+cache/
+artifacts/
+typechain-types/
+
+# TypeScript compiled output
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Coverage
+coverage/
+coverage.json
+
+# Hardhat ignition deployments
+ignition/deployments/
