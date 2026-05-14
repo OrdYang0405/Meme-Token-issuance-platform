@@ -7,7 +7,28 @@ import { MemeFactory__factory } from "@typechain/factories/contracts/MemeFactory
 // 合约地址（部署后替换）
 export const FACTORY_ADDRESS = "0x0000000000000000000000000000000000000000";
 
-// 支持的链配置
+// ============ Uniswap V2 地址（按链 ID 映射）============
+
+export const UNISWAP_ADDRESSES: Record<
+  number,
+  { factory: string; router: string }
+> = {
+  1: {
+    factory: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+    router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+  },
+  11155111: {
+    factory: "0x7E0987E5b3a30e3f2828572Bb659A548460a3003",
+    router: "0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008",
+  },
+  31337: {
+    factory: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+    router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+  },
+};
+
+// ============ 支持的链配置 ============
+
 export const SUPPORTED_CHAINS: Record<
   number,
   { name: string; rpcUrl: string; explorerUrl: string }
