@@ -26,3 +26,7 @@ coverage.json
 
 # Hardhat ignition deployments
 ignition/deployments/
+
+# Courseware (not uploaded to GitHub)
+课件/
+课程计划*.md
