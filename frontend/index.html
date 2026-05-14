@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meme 代币发行平台</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 24px 16px;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 32px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      color: #f1f5f9;
+    }
+
+    .wallet-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #current-account {
+      font-family: monospace;
+      color: #94a3b8;
+      font-size: 0.875rem;
+    }
+
+    /* ── Buttons ── */
+    button {
+      cursor: pointer;
+      font-size: 0.875rem;
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: none;
+      font-weight: 500;
+      transition: opacity 0.15s;
+    }
+
+    button:disabled { cursor: not-allowed; opacity: 0.5; }
+
+    .btn-primary {
+      background: #3b82f6;
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: #2563eb; }
+
+    .btn-outline {
+      background: transparent;
+      color: #3b82f6;
+      border: 1px solid #3b82f6;
+    }
+    .btn-outline:hover:not(:disabled) { background: rgba(59,130,246,0.1); }
+
+    .btn-create {
+      width: 100%;
+      padding: 12px;
+      font-size: 1rem;
+      margin-top: 16px;
+      background: #22c55e;
+      color: #0f172a;
+    }
+    .btn-create:hover:not(:disabled) { background: #16a34a; }
+    .btn-create.loading { background: #64748b; }
+
+    .hidden { display: none !important; }
+
+    /* ── Sections ── */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+    }
+
+    @media (max-width: 768px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    section {
+      background: #1e293b;
+      border-radius: 10px;
+      padding: 24px;
+    }
+
+    h2 {
+      font-size: 1.125rem;
+      margin-bottom: 20px;
+      color: #f1f5f9;
+    }
+
+    /* ── Form ── */
+    fieldset {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    legend {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #64748b;
+      padding: 0 8px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+
+    .hint {
+      color: #475569;
+      font-weight: normal;
+      margin-left: 6px;
+    }
+
+    input {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+      transition: border-color 0.15s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+
+    input.invalid { border-color: #ef4444; }
+    input.valid { border-color: #22c55e; }
+
+    .error-msg {
+      display: block;
+      color: #ef4444;
+      font-size: 0.75rem;
+      margin-top: 2px;
+      min-height: 1em;
+    }
+
+    .tax-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .tax-percent-display {
+      color: #22c55e;
+      font-size: 0.75rem;
+      margin-left: 6px;
+    }
+
+    /* ── Fee display ── */
+    .fee-display {
+      padding: 10px 14px;
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.2);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-size: 0.875rem;
+    }
+
+    .fee-display strong { color: #fbbf24; }
+
+    /* ── Status ── */
+    #tx-status {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      word-break: break-all;
+    }
+
+    .status-success { background: rgba(34,197,94,0.1); color: #22c55e; border: 1px solid rgba(34,197,94,0.2); }
+    .status-error   { background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.2); }
+    .status-info    { background: rgba(59,130,246,0.1); color: #3b82f6; border: 1px solid rgba(59,130,246,0.2); }
+
+    /* ── Table ── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 8px 10px;
+      color: #64748b;
+      font-weight: 500;
+      border-bottom: 1px solid #334155;
+    }
+
+    td {
+      padding: 10px;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .token-name { font-weight: 600; color: #f1f5f9; }
+    .token-symbol { color: #64748b; margin-left: 4px; }
+
+    .tax-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #334155;
+      font-size: 0.7rem;
+    }
+    .tax-badge + .tax-badge { margin-left: 4px; }
+
+    .addr {
+      font-family: monospace;
+      color: #64748b;
+      font-size: 0.75rem;
+    }
+
+    .empty {
+      text-align: center;
+      color: #475569;
+      padding: 24px !important;
+    }
+
+    /* ── Pagination ── */
+    #pagination {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+
+    .page-btn {
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      border-radius: 4px;
+      background: #334155;
+      color: #cbd5e1;
+      border: none;
+    }
+    .page-btn:hover:not(:disabled) { background: #475569; }
+    .page-btn.active { background: #3b82f6; color: #fff; }
+
+    .page-ellipsis {
+      color: #475569;
+      padding: 4px 2px;
+      font-size: 0.75rem;
+    }
+
+    #list-info {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <header>
+    <h1>Meme 代币发行平台</h1>
+    <div class="wallet-bar">
+      <span id="current-account">未连接</span>
+      <button id="btn-connect" class="btn-outline">连接钱包</button>
+    </div>
+  </header>
+
+  <div class="grid-2">
+    <!-- 创建表单 -->
+    <section>
+      <h2>创建你的 Meme 代币</h2>
+
+      <form id="create-token-form" autocomplete="off">
+        <fieldset>
+          <legend>代币基本信息</legend>
+
+          <label>
+            代币名称 <span class="hint">1-32 字符</span>
+            <input type="text" id="input-name" maxlength="32"
+                   placeholder="例如: Doge Moon" required />
+            <span class="error-msg" data-for="name"></span>
+          </label>
+
+          <label>
+            代币符号 <span class="hint">3-8 个大写字母</span>
+            <input type="text" id="input-symbol" minlength="3" maxlength="8"
+                   pattern="[A-Z]+" placeholder="例如: DGMOON" required />
+            <span class="error-msg" data-for="symbol"></span>
+          </label>
+
+          <label>
+            总供应量 <span class="hint">1,000 ~ 1,000,000,000,000</span>
+            <input type="number" id="input-supply" min="1000"
+                   max="1000000000000" step="1" placeholder="1000000" required />
+            <span class="error-msg" data-for="supply"></span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>钱包与税费配置</legend>
+
+          <label>
+            营销钱包地址 <span class="hint">接收营销税费</span>
+            <input type="text" id="input-marketing"
+                   pattern="0x[0-9a-fA-F]{40}" placeholder="0x..." required />
+            <span class="error-msg" data-for="marketing"></span>
+          </label>
+
+          <label>
+            团队钱包地址 <span class="hint">接收团队税费</span>
+            <input type="text" id="input-team"
+                   pattern="0x[0-9a-fA-F]{40}" placeholder="0x..." required />
+            <span class="error-msg" data-for="team"></span>
+          </label>
+
+          <div class="tax-row">
+            <label>
+              买入税 <span class="hint">基点 (100 = 1%)</span>
+              <input type="number" id="input-buy-tax" min="0" max="2500"
+                     step="1" value="500" />
+              <span class="tax-percent-display" id="buy-tax-pct">= 5.00%</span>
+              <span class="error-msg" data-for="buyTax"></span>
+            </label>
+
+            <label>
+              卖出税 <span class="hint">基点 (100 = 1%)</span>
+              <input type="number" id="input-sell-tax" min="0" max="2500"
+                     step="1" value="500" />
+              <span class="tax-percent-display" id="sell-tax-pct">= 5.00%</span>
+              <span class="error-msg" data-for="sellTax"></span>
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="fee-display">
+          创建费用：<strong id="creation-fee-display">加载中...</strong>
+        </div>
+
+        <button type="submit" id="btn-create" class="btn-create" disabled>
+          请先连接钱包
+        </button>
+
+        <div id="tx-status" class="hidden"></div>
+      </form>
+    </section>
+
+    <!-- 代币列表 -->
+    <section>
+      <h2>已创建代币</h2>
+
+      <div id="list-info">加载中...</div>
+
+      <table id="token-table">
+        <thead>
+          <tr>
+            <th>代币</th>
+            <th>总供应量</th>
+            <th>税率</th>
+            <th>合约地址</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div id="pagination"></div>
+    </section>
+  </div>
+</div>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
