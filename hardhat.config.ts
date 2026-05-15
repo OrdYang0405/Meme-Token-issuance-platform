@@ -1,10 +1,18 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
+import "hardhat-gas-reporter";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
-const { SEPOLIA_RPC_URL, MAINNET_RPC_URL, PRIVATE_KEY, ETHERSCAN_API_KEY } = process.env;
+const {
+  SEPOLIA_RPC_URL,
+  MAINNET_RPC_URL,
+  PRIVATE_KEY,
+  ETHERSCAN_API_KEY,
+  COINMARKETCAP_API_KEY,
+  REPORT_GAS,
+} = process.env;
 
 const networks: HardhatUserConfig["networks"] = {
   hardhat: {
@@ -41,6 +49,17 @@ const config: HardhatUserConfig = {
     tests: "./test",
     cache: "./cache",
     artifacts: "./artifacts",
+  },
+  gasReporter: {
+    enabled: REPORT_GAS === "true",
+    currency: "USD",
+    coinmarketcap: COINMARKETCAP_API_KEY || "",
+    token: "ETH",
+    gasPriceApi:
+      "https://api.etherscan.io/api?module=proxy&action=eth_gasPrice",
+    showTimeSpent: true,
+    outputFile: "gas-report.txt",
+    noColors: false,
   },
 };
 
