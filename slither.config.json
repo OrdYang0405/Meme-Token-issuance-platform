@@ -1,0 +1,7 @@
+{
+  "detectors_to_exclude": "naming-convention,similar-names,external-function",
+  "filter_paths": "node_modules|@openzeppelin|typechain-types|artifacts|cache",
+  "compile_force_framework": "hardhat",
+  "hardhat_artifacts_directory": "artifacts",
+  "hardhat_cache_directory": "cache"
+}

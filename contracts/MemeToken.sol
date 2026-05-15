@@ -26,6 +26,11 @@ interface IUniswapV2Router02 {
         address to,
         uint256 deadline
     ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
+
+    function getAmountsOut(uint256 amountIn, address[] calldata path)
+        external
+        view
+        returns (uint256[] memory amounts);
 }
 
 contract MemeToken is ERC20, Ownable2Step, Pausable {
@@ -71,6 +76,17 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
     bool public swapAndLiquifyEnabled = true;
     bool private _inSwap;
 
+    // ── 安全：Router 锁定（一次写入，永久生效）──
+    bool public routerLocked;
+
+    // ── 安全：滑点保护 ──
+    uint256 public slippageBPS = 100; // 默认 1%
+    uint256 public constant MIN_SLIPPAGE_BPS = 50;  // 最低 0.5%
+    uint256 public constant MAX_SLIPPAGE_BPS = 500;  // 最高 5%
+
+    // ── 安全：swapThreshold 上限 ──
+    uint256 public maxSwapThreshold;
+
     // ============ 事件 ============
     event TaxCharged(address indexed from, address indexed to, uint256 taxAmount, bool isSell);
     event TaxDistributed(uint256 marketing, uint256 liquidity, uint256 team, uint256 burned);
@@ -87,6 +103,8 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
     event UniswapRouterSet(address router);
     event RescueETH(address indexed to, uint256 amount);
     event RescueToken(address indexed token, address indexed to, uint256 amount);
+    event RouterLocked();
+    event SlippageUpdated(uint256 oldBPS, uint256 newBPS);
 
     // ============ 构造函数 ============
     constructor(
@@ -111,6 +129,7 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
         maxTransactionAmount = supply / 50;
         maxWalletAmount = supply / 50;
         swapThreshold = supply / 1000;
+        maxSwapThreshold = supply / 100; // 不超过总供应量的 1%
 
         isExcludedFromFee[msg.sender] = true;
         isExcludedFromFee[address(this)] = true;
@@ -234,9 +253,18 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
 
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
+        // 滑点保护：基于 Pair 当前储备计算最小输出量
+        uint256 minOut = 0;
+        try uniswapV2Router.getAmountsOut(tokenAmount, path) returns (uint256[] memory amounts) {
+            minOut = (amounts[1] * (10000 - slippageBPS)) / 10000;
+        } catch {
+            // 当 Pair 未创建或流动性不足时，回退到 slippageBPS=0
+            // 此情况仅发生在首次添加流动性之前
+        }
+
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
-            0,
+            minOut,
             path,
             address(this),
             block.timestamp
@@ -246,11 +274,14 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
     function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
+        uint256 tokenMin = (tokenAmount * (10000 - slippageBPS)) / 10000;
+        uint256 ethMin = (ethAmount * (10000 - slippageBPS)) / 10000;
+
         uniswapV2Router.addLiquidityETH{value: ethAmount}(
             address(this),
             tokenAmount,
-            0,
-            0,
+            tokenMin,
+            ethMin,
             address(this),
             block.timestamp
         );
@@ -353,9 +384,17 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
     }
 
     function setUniswapRouter(address _router) external onlyOwner {
+        require(!routerLocked, "router locked");
         require(_router != address(0), "zero router");
         uniswapV2Router = IUniswapV2Router02(_router);
         emit UniswapRouterSet(_router);
+    }
+
+    function lockRouter() external onlyOwner {
+        require(!routerLocked, "already locked");
+        require(address(uniswapV2Router) != address(0), "router not set");
+        routerLocked = true;
+        emit RouterLocked();
     }
 
     function setUniswapPair(address _pair) external onlyOwner {
@@ -365,6 +404,8 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
     }
 
     function setSwapThreshold(uint256 _threshold) external onlyOwner {
+        require(_threshold > 0, "zero threshold");
+        require(_threshold <= maxSwapThreshold, "threshold too high");
         swapThreshold = _threshold;
     }
 
@@ -372,9 +413,17 @@ contract MemeToken is ERC20, Ownable2Step, Pausable {
         swapAndLiquifyEnabled = _enabled;
     }
 
+    function setSlippageBPS(uint256 _bps) external onlyOwner {
+        require(_bps >= MIN_SLIPPAGE_BPS && _bps <= MAX_SLIPPAGE_BPS, "invalid slippage");
+        uint256 old = slippageBPS;
+        slippageBPS = _bps;
+        emit SlippageUpdated(old, _bps);
+    }
+
     // ============ 紧急资产回收 ============
 
     function rescueETH() external onlyOwner {
+        require(!_inSwap, "swap in progress");
         uint256 amount = address(this).balance;
         payable(owner()).transfer(amount);
         emit RescueETH(owner(), amount);
